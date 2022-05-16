@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np 
+from torch.distributions import MultivariateNormal
+
 
 def weight_init(m):
     """Custom weight init Linear layers."""
@@ -14,7 +16,7 @@ class QNet(nn.Module):
         super().__init__()
         self.layers = []
         self.layers.append(nn.Linear(observation_shp+action_shp,hidden_layers[0]))
-        for i in range(1,len(hidden_layers)):
+        for i in range(1,len(hidden_layers)-1):
             self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(hidden_layers[i-1],hidden_layers[i]))
         self.layers.append(nn.ReLU())
@@ -49,7 +51,7 @@ class Actor(nn.Module):
         self.layers = []
         print(observation_shp,action_shp,num_skills,hidden_layers)
         self.layers.append(nn.Linear(observation_shp + num_skills,hidden_layers[0]))
-        for i in range(1,len(hidden_layers)):
+        for i in range(1,len(hidden_layers)-1):
             self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(hidden_layers[i-1],hidden_layers[i]))
         self.layers.append(nn.ReLU())
@@ -89,7 +91,7 @@ class Discriminator(nn.Module):
 
         self.layers = []
         self.layers.append(nn.Linear(observation_shp,hidden_layers[0]))
-        for i in range(1,len(hidden_layers)):
+        for i in range(1,len(hidden_layers)-1):
             self.layers.append(nn.ReLU())
             self.layers.append(nn.Linear(hidden_layers[i-1],hidden_layers[i]))
         self.layers.append(nn.ReLU())
@@ -109,4 +111,92 @@ class Discriminator(nn.Module):
             return outputs.gather(1,skill.type(torch.int64))
         else:
             return self.layers(observation)
+
+class JSD(nn.Module):
+    def __init__(self, object_shp, robot_shp, hidden_layers=(300,300)):
+        super().__init__()
+
+        self.layers = []
+        self.layers.append(nn.Linear(object_shp+robot_shp,hidden_layers[0]))
+        for i in range(1,len(hidden_layers)-1):
+            self.layers.append(nn.ReLU())
+            self.layers.append(nn.Linear(hidden_layers[i-1],hidden_layers[i]))
+        self.layers.append(nn.ReLU())
+        self.layers.append(nn.Linear(hidden_layers[-1],1))
+        self.layers = nn.Sequential(*self.layers)
+
+        self.apply(weight_init)
+
+    def forward(self,x):
+        out = self.layers(x) #might add softmax
+        T_transform = torch.log(torch.tensor(2)) - torch.log(1 + torch.exp(-out))
+        f_transform = - torch.log(2 - torch.exp(T_transform))
+        return T_transform - f_transform
+
+class DADS(nn.Module):
+    def __init__(self,object_shp,num_skills,hidden_layers=(300,300),L=10):
+        super().__init__()
+        self.layers = []
+        self.layers.append(nn.Linear(object_shp + num_skills,hidden_layers[0]))
+        for i in range(1,len(hidden_layers)-1):
+            self.layers.append(nn.ReLU())
+            self.layers.append(nn.Linear(hidden_layers[i-1],hidden_layers[i]))
+        self.layers.append(nn.ReLU())
+        self.layers.append(nn.Linear(hidden_layers[-1],2*object_shp))
+        self.layers = nn.Sequential(*self.layers)
+
+        self.object_shp = self.object_shp
+        self.num_skills = num_skills
+        self.L = L
+
+        self.apply(weight_init)
+
+    def forward(self,s,z,nexts):
+        if len(z.shape)==2:
+            z = z.squeeze(-1)
+        skills = F.one_hot(z.long(),num_classes = self.num_skills)
+        inputs = torch.cat([s,skills],dim=1)
+
+        mu,log_std = self.layers(inputs).chunk(2,dim=-1)
+        scale = torch.square(log_std.exp())
+        mvn = MultivariateNormal(mu, scale_tril=torch.diag(scale))
+        return mvn.log_prob(nexts)
+
+    def compute_MI(self,s,z,nexts):
+        # s shape [batch,obj_dim]
+        # skill shape [batch,1]
+        # next shape [batch,obj_dim]
+        batch_size = s.shape[0]
+        if len(z.shape)==2:
+            z = z.squeeze(-1)
+        skill = F.one_hot(z.long(),num_classes = self.num_skills)
+        input = torch.cat([s,skill],dim=1)
+
+        mu,log_std = self.layers(input).chunk(2,dim=-1)
+        scale = torch.square(log_std.exp())
+        mvn = MultivariateNormal(mu, scale_tril=torch.diag(scale))
+        q = mvn.log_prob(nexts)
+
+        zs = torch.tensor(np.random.choice(self.num_skills,size =  batch_size*self.L))
+        zs = F.one_hot(zs.long(),num_classes = self.num_skills)
+        if len(s.shape)==1:
+            s = s.unsqueeze(0)
+        input = s.repeat(self.L,1) #input has the form [[motif,motif,motif...]]
+        input = torch.cat([input,zs],dim=1)
+        
+        mu,log_std = self.layers(input).chunk(2,dim=-1)
+        scale = torch.square(log_std.exp())
+        mvn = MultivariateNormal(mu,scale_tril = torch.diag(scale))
+
+        if len(nexts.shape)==1:
+            nexts = nexts.unsqueeze(0)
+        p = mvn.log_prob(nexts.repeat(self.L,1)).view(self.L,batch_size,self.object_shp)
+        p = torch.logcumsumexp(p,dim=1)
+        return q-p + torch.log(torch.tensor(self.L))
+
+
+
+
+
+
         

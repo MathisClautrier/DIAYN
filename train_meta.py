@@ -15,13 +15,16 @@ from storage import ReplayBuffer
 import mj_envs
 import gym
 
-from agent import DIAYN
+from agent import DIAYN,JSD_DADS
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed",default=0, help="display a square of a given number",type=int)
 parser.add_argument("--taskname",default="pen-v0", help="display a square of a given number",type=str)
+parser.add_argument("--DIAYN", action="store_true")
+
 args_2 = parser.parse_args()
 
+eval_save = 100000
 def evaluate(env, agent, num_episodes, step, args):
     all_ep_rewards = []
 
@@ -68,14 +71,21 @@ def train(cfg):
         torch.cuda.manual_seed_all(args.seed)
     env = gym.make(args_2.taskname)
     env.seed(args.seed)
+    if args_2.DIAYN:
+        name = args_2.taskname+str(args.seed)+"DIAYN"
+        args_dic['mode']="DIAYN"
+    else:
+        name = args_2.taskname+str(args.seed)+"JSD_DADS"
+        args_dic['mode']="JSD_DADS"
+
     wandb.init(project="DIAYN",
             config = args_dic,
-            name = args_2.taskname+str(args.seed))
+            name = name)
     # make directory
     ts = time.gmtime() 
     ts = time.strftime("%m-%d", ts)    
     env_name = args_2.taskname
-    exp_name = env_name +'-' + str(args.batch_size) + '-s' + str(args.seed)
+    exp_name = env_name +'-' + str(args.batch_size) + '-s' + str(args.seed) + "-mode" + str(args_2.DIAYN)
     args.work_dir = args.work_dir + '/'  + exp_name
     try:
         os.mkdir(args.work_dir)
@@ -100,7 +110,15 @@ def train(cfg):
     )
     num_skills = args_dic['num_skills']
     args_dic.pop('num_skills')
-    agent = DIAYN(obs_shape[0],action_shape[0],num_skills,device,**args_dic)
+    if args_2.DIAYN:
+        agent = DIAYN(obs_shape[0],action_shape[0],num_skills,device,**args_dic)
+    else:
+        assert args_dic["obj_index"]
+        assert args_dic["robot_index"]
+        obj_index = args_dic.pop('obj_index')
+        robot_index = args_dic.pop("robot_index")
+        agent = JSD_DADS(obs_shape[0],action_shape[0],obj_index,\
+            robot_index,num_skills,device,**args_dic)
 
 
     episode, episode_reward, done = 0, 0, True
@@ -115,7 +133,7 @@ def train(cfg):
 
         if done:
             if step % args.log_interval == 0:
-                wandb.log({'train/episode_reward': episode_reward}, step)
+                wandb.log({'train_episode_reward': episode_reward}, step)
 
             obs = env.reset()
             z = np.random.choice(agent.num_skills)
@@ -147,9 +165,17 @@ def train(cfg):
 
         obs = next_obs
         episode_step += 1
-    torch.save(agent.actor.state_dict(),args.work_dir+"/actor.pth")
-    torch.save(agent.critic.state_dict(),args.work_dir+"/critic.pth")
-    torch.save(agent.discriminator.state_dict(),args.work_dir+"/disciminator.pth")
+        if step%eval_save==0:
+            suffix = str(step//eval_save)+".pth"
+            torch.save(agent.actor.state_dict(),args.work_dir+"/actor_"+suffix)
+            torch.save(agent.critic.state_dict(),args.work_dir+"/critic_"+suffix)
+            torch.save(agent.jsd.state_dict(),args.work_dir+"/jsd_"+suffix)
+            torch.save(agent.dads.state_dict(),args.work_dir+"/dads_"+suffix)
+
+    torch.save(agent.actor.state_dict(),args.work_dir+"/actor_end.pth")
+    torch.save(agent.critic.state_dict(),args.work_dir+"/critic_end.pth")
+    torch.save(agent.jsd.state_dict(),args.work_dir+"/jsd_end.pth")
+    torch.save(agent.dads.state_dict(),args.work_dir+"/dads_end.pth")
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
