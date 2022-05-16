@@ -47,6 +47,7 @@ class Actor(nn.Module):
     log_std_max,hidden_layers=(300,300)):
         super().__init__()
         self.layers = []
+        print(observation_shp,action_shp,num_skills,hidden_layers)
         self.layers.append(nn.Linear(observation_shp + num_skills,hidden_layers[0]))
         for i in range(1,len(hidden_layers)):
             self.layers.append(nn.ReLU())
@@ -62,9 +63,11 @@ class Actor(nn.Module):
         self.apply(weight_init)
 
     def forward(self,obs,z):
-        skills = F.one_hot(z,num_classes = self.num_skills)
-        input = torch.cat([obs,skills],dim=1)
-        mu,log_std = self.layers(input).chunk(2,dim=-1)
+        if len(z.shape)==2:
+            z = z.squeeze(-1)
+        skills = F.one_hot(z.long(),num_classes = self.num_skills)
+        inputs = torch.cat([obs,skills],dim=1)
+        mu,log_std = self.layers(inputs).chunk(2,dim=-1)
         log_std = self.log_std_m + 0.5 * (self.log_std_M - self.log_std_m) * (torch.tanh(log_std) + 1)
         std = torch.exp(log_std)
         epsilon = torch.randn_like(mu)
@@ -103,7 +106,7 @@ class Discriminator(nn.Module):
             if len(skill.shape)==1:
                 skill = skill.unsqueeze(-1)
             outputs = self.layers(observation)
-            return outputs.gather(1,skill)
+            return outputs.gather(1,skill.type(torch.int64))
         else:
             return self.layers(observation)
         

@@ -9,11 +9,14 @@ import dmc2gym
 import wandb
 from argparse import Namespace
 import numpy as np
-
+import wandb
 from storage import ReplayBuffer
 
 from agent import DIAYN
-
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--seed",default=0, help="display a square of a given number",type=int)
+args_2 = parser.parse_args()
 
 def evaluate(env, agent, num_episodes, step, args):
     all_ep_rewards = []
@@ -29,7 +32,7 @@ def evaluate(env, agent, num_episodes, step, args):
             agent.actor.eval()
             n=0
             while not done:
-                action,_ = agent.select_action(obs,z)
+                action = agent.select_action(obs,z)
                 obs, reward, done, _ = env.step(action)
                 episode_reward += reward
                 if n > 100:
@@ -52,6 +55,8 @@ def train(cfg):
     with open(cfg) as f:
         args_dic = json.load(f)
     args = Namespace(**args_dic)
+    args.seed = args_2.seed
+    print(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -63,21 +68,22 @@ def train(cfg):
         seed=args.seed,
         visualize_reward=False,
         from_pixels=False,
-        height=args.pre_transform_image_size,
-        width=args.pre_transform_image_size,
         frame_skip=args.action_repeat
     )
     env.seed(args.seed)
-
+    wandb.init(project="DIAYN",
+            config = args_dic,
+            name = args.domain_name+args.task_name+str(args.seed))
     # make directory
     ts = time.gmtime() 
     ts = time.strftime("%m-%d", ts)    
     env_name = args.domain_name + '-' + args.task_name
-    exp_name = env_name + '-' + ts + '-im' + str(args.image_size) +'-b'  \
-    + str(args.batch_size) + '-s' + str(args.seed)  + '-' + args.encoder_type
+    exp_name = env_name +'-' + str(args.batch_size) + '-s' + str(args.seed)
     args.work_dir = args.work_dir + '/'  + exp_name
-
-
+    try:
+        os.mkdir(args.work_dir)
+    except:
+        pass
     with open(os.path.join(args.work_dir, 'args.json'), 'w') as f:
         json.dump(vars(args), f, sort_keys=True, indent=4)
     
@@ -95,8 +101,9 @@ def train(cfg):
         batch_size=args.batch_size,
         device=device,
     )
-    num_skills = args['num_skills']
-    agent = DIAYN(obs_shape,action_shape,device,num_skills,**args_dic)
+    num_skills = args_dic['num_skills']
+    args_dic.pop('num_skills')
+    agent = DIAYN(obs_shape[0],action_shape[0],num_skills,device,**args_dic)
 
 
     episode, episode_reward, done = 0, 0, True
@@ -139,12 +146,15 @@ def train(cfg):
             done
         )
         episode_reward += reward
-        replay_buffer.add(obs, action, reward, z, done_bool)
+        replay_buffer.add(obs, action, reward,next_obs, z, done_bool)
 
         obs = next_obs
         episode_step += 1
+    torch.save(agent.actor.state_dict(),args.work_dir+"/actor.pth")
+    torch.save(agent.critic.state_dict(),args.work_dir+"/critic.pth")
+    torch.save(agent.discriminator.state_dict(),args.work_dir+"/disciminator.pth")
 
 if __name__ == '__main__':
     torch.multiprocessing.set_start_method('spawn')
 
-    train("cfg/cfg.json")
+    train("cfg.json")

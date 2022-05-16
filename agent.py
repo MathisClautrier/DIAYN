@@ -67,12 +67,12 @@ class DIAYN(object):
         self.target_entropy = -np.prod(action_shape)
 
         self.actor_optimizer = torch.optim.Adam(
-            self.actor.pi.parameters(),
+            self.actor.parameters(),
             lr=actor_lr, betas=(actor_beta, 0.999)
         )
 
         self.critic_optimizer = torch.optim.Adam(
-            list(self.critic.proj.parameters())+list(self.critic.Q1.parameters())+list(self.critic.Q2.parameters()), 
+            self.critic.parameters(), 
             lr=critic_lr, betas=(critic_beta, 0.999)
         )
 
@@ -81,7 +81,7 @@ class DIAYN(object):
         )
 
         self.discriminator_optimizer = torch.optim.Adam(
-            self.actor.pi.parameters(),
+            self.discriminator.parameters(),
             lr = discri_lr,
         )
 
@@ -99,14 +99,14 @@ class DIAYN(object):
         with torch.no_grad():
             obs = torch.FloatTensor(obs).to(self.device)
             obs = obs.unsqueeze(0)
-            mu, _, _, _ = self.actor(obs,z)
+            mu, _, _, _ = self.actor(obs,z.to(self.device))
             return mu.cpu().data.numpy().flatten()
 
     def sample_action(self, obs,z):
         with torch.no_grad():
             obs = torch.FloatTensor(obs).to(self.device)
             obs = obs.unsqueeze(0)
-            _,_, pi, _  = self.actor(obs,z)
+            _,_, pi, _  = self.actor(obs,z.to(self.device))
             return pi.cpu().data.numpy().flatten()
 
     def critic_step(self,obs,action,reward,next_obs,skills,not_done,step):
@@ -134,7 +134,7 @@ class DIAYN(object):
         self.critic_optimizer.step()
 
     def actor_alpha_step(self,obs,skills,step):
-        _,_,pi,log_pi,_ = self.actor(obs,skills)
+        _,_,pi,log_pi = self.actor(obs,skills)
         actor_Q1, actor_Q2 = self.critic(obs, pi)
 
         actor_Q = torch.min(actor_Q1, actor_Q2)
@@ -160,10 +160,8 @@ class DIAYN(object):
 
     def discriminator_step(self,obs,skills,step):
         predicted_skills = self.discriminator(obs,skills,select=False)
-        one_hot = F.one_hot(skills,num_classes = self.num_skills)
-
-        discriminator_loss = self.cross_entropy_loss(predicted_skills,one_hot.float())
-
+        skills= skills.squeeze(-1)
+        discriminator_loss = self.cross_entropy_loss(predicted_skills.exp(),skills.long())
         if step %self.log_interval ==0:
             wandb.log({'train_discriminator_loss':discriminator_loss},step)
         self.discriminator_optimizer.zero_grad()
@@ -171,13 +169,13 @@ class DIAYN(object):
         self.discriminator_optimizer.step()
 
     def update(self,replay_buffer,step):
-        obs, action, reward, next_obs, skills, not_done = replay_buffer.sample()
-
+        obs, action, reward, next_obs, skills,not_done = replay_buffer.sample()
     
         if step % self.log_interval == 0:
+        #    print("Fancy updating ",step)
             wandb.log({'train/batch_reward': reward.mean()}, step)
 
-        self.critic_step(obs, action, reward, next_obs, not_done, skills, step)
+        self.critic_step(obs, action, reward, next_obs,skills, not_done, step)
         self.discriminator_step(obs,skills,step)
         if step % self.actor_update_freq == 0:
             self.actor_alpha_step(obs, skills, step)
